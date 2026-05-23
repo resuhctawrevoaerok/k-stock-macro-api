@@ -1,4 +1,4 @@
-FinanceDataReader
-requests
 fastapi
 uvicorn
+yfinance
+requests
