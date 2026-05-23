@@ -1,0 +1,4 @@
+FinanceDataReader
+requests
+fastapi
+uvicorn
