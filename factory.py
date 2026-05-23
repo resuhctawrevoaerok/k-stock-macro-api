@@ -1,4 +1,4 @@
-import FinanceDataReader as fdr
+import yfinance as yf
 import requests
 import json
 import urllib.request
@@ -7,7 +7,6 @@ import urllib.parse
 from fastapi import FastAPI, Query, HTTPException
 import uvicorn
 
-# 1. FastAPI 앱 객체 생성
 app = FastAPI(
     title="K-Stock Macro Intelligence API",
     description="Python 파이썬 기반 한국 기술주 매크로 분석 및 AI 리포트 자동 생성 API",
@@ -39,10 +38,6 @@ def calculate_rsi(df, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
 
-# ===================================================================
-# [API 엔드포인트 설계] 사용자가 주소창에 변수를 실어 보내면 호출되는 함수
-# 예: http://localhost:8000/report?ticker=000660&company_name=SK%20Hynix
-# ===================================================================
 @app.get("/report")
 async def get_stock_report(
     ticker: str = Query(..., description="주식 종목 코드 (e.g., 005930)"),
@@ -51,8 +46,10 @@ async def get_stock_report(
     openai_key: str = Query(..., description="사용자의 OpenAI API Key")
 ):
     try:
-        # 주식 및 매크로 데이터 수집
-        df_stock = fdr.DataReader(ticker)
+        # 💡 [렌더 서버 전용] yfinance 기반 호환 코드로 교체
+        yf_ticker = f"{ticker}.KS" if not ticker.endswith(".KS") else ticker
+        df_stock = yf.Ticker(yf_ticker).history(period="1mo")
+        
         if df_stock.empty:
             raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' 데이터를 찾을 수 없습니다.")
             
@@ -60,20 +57,20 @@ async def get_stock_report(
         current_price = int(latest_data.get('Close', 0))
         volume = int(latest_data.get('Volume', 0))
         
-        change_rate = 0.0
-        if 'Chg' in latest_data:
-            val = latest_data['Chg']
-            change_rate = val * 100 if abs(val) < 1 and val != 0 else val
+        # 변동률 직접 계산
+        df_stock['Chg'] = df_stock['Close'].pct_change()
+        change_rate = df_stock.iloc[-1]['Chg'] * 100 if not df_stock.empty else 0.0
         change_rate_str = f"{change_rate:+.2f}%"
         
         real_rsi = calculate_rsi(df_stock, period=rsi_period)
         rsi_status = "Overbought" if real_rsi >= 70 else "Oversold" if real_rsi <= 30 else "Neutral"
 
-        df_usd = fdr.DataReader("USD/KRW")
+        # 거시경제 데이터 (환율 및 반도체 지수)
+        df_usd = yf.Ticker("USDKRW=X").history(period="5d")
         current_usd_krw = df_usd.iloc[-1]['Close'] if not df_usd.empty else 0.0
         fx_interpretation = "Weakening KRW (High FX Rate)" if current_usd_krw >= 1350 else "Strengthening KRW (Normal/Low FX Rate)"
         
-        df_sox = fdr.DataReader("^SOX")
+        df_sox = yf.Ticker("^SOX").history(period="5d")
         sox_change = 0.0
         if not df_sox.empty and len(df_sox) > 1:
             sox_change = ((df_sox.iloc[-1]['Close'] - df_sox.iloc[-2]['Close']) / df_sox.iloc[-2]['Close']) * 100
@@ -81,11 +78,10 @@ async def get_stock_report(
 
         live_news = get_english_news(company_name)
 
-        # AI 프롬프트 구성
         packaged_context = (
             f"[HARD MARKET METRICS]\n"
             f"- Ticker: {ticker} ({company_name})\n"
-            f"- Samsung Price: {current_price:,} KRW ({change_rate_str})\n"
+            f"- Current Price: {current_price:,} KRW ({change_rate_str})\n"
             f"- Technical RSI ({rsi_period}): {real_rsi:.2f} ({rsi_status})\n"
             f"- USD/KRW Rate: {current_usd_krw:,.2f} KRW -> Condition: {fx_interpretation}\n"
             f"- Global Chip Index (^SOX) Shift: {sox_change:+.2f}% -> Condition: {sox_status}\n\n"
@@ -93,10 +89,9 @@ async def get_stock_report(
             f"{live_news}\n"
         )
 
-        system_instruction = "You are a strict financial report generator. Reference the headlines and conditions directly. Do not invent facts."
+        system_instruction = "You are a strict financial report generator. Reference the headlines and conditions directly. Do not invert facts."
         user_prompt = f"Write exactly 3 distinct paragraphs (Macro, Bull Case, Bear Case) based on this data:\n{packaged_context}"
 
-        # OpenAI API 호출
         headers = {
             "Authorization": f"Bearer {openai_key}",
             "Content-Type": "application/json"
@@ -117,7 +112,6 @@ async def get_stock_report(
         result = response.json()
         ai_analysis_text = result['choices'][0]['message']['content'].strip()
         
-        # 표준화된 JSON 응답 반환
         return {
             "status": "success",
             "data": {
@@ -138,10 +132,8 @@ async def get_stock_report(
                 "report": ai_analysis_text
             }
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 로컬에서 서버 가동 테스트용
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
